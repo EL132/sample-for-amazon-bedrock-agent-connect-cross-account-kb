@@ -1,0 +1,580 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Complete CloudFormation template for Amazon Bedrock Agent with Lambda function for cross-account knowledge base queries'
+
+Parameters:
+  BedrockAgentName:
+    Type: String
+    Default: 'bedrock_kb_query_cross_account'
+    Description: Name of the Amazon Bedrock Agent
+    
+  BedrockAgentDescription:
+    Type: String
+    Default: 'Agent to query inventory data from Redshift Serverless database'
+    Description: Description of the Amazon Bedrock Agent
+    
+  BedrockAgentInstructions:
+    Type: String
+    Default: 'You are an assistant that helps users query inventory data from our Redshift Serverless database using the action group.'
+    Description: Instructions for the Amazon Bedrock Agent
+    
+  AgentFoundationModelId:
+    Type: String
+    Default: 'us.amazon.nova-pro-v1:0'
+    Description: Foundation model ID to use for the agent
+    
+  AgentLambdaExecutionRoleArn:
+    Type: String
+    Description: ARN of the IAM role for Lambda execution (created by the shell script)
+    
+  KnowledgeBaseId:
+    Type: String
+    Description: ID of the Amazon Bedrock Knowledge Base
+  
+  TargetRoleArn:
+    Type: String
+    Description: ARN of the role to assume in the target account (created by the shell script)
+  
+  KBFoundationModelId:
+    Type: String
+    Default: 'meta.llama3-1-70b-instruct-v1:0'
+    Description: Foundation model to use for Bedrock knowledge base queries
+
+Resources:
+  # S3 Bucket for API Schema
+  SchemaBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub 'bedrock-agent-schema-${AWS::AccountId}-${AWS::Region}'
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+  # Lambda function to upload OpenAPI schema to S3
+  UploadOpenApiSchemaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.handler
+      Role: !GetAtt UploadOpenApiSchemaRole.Arn
+      Runtime: python3.10
+      Timeout: 60
+      Code:
+        ZipFile: |
+          import boto3
+          import cfnresponse
+          import os
+          import json
+          
+          def handler(event, context):
+              response_data = {}
+              try:
+                  if event['RequestType'] == 'Create' or event['RequestType'] == 'Update':
+                      s3 = boto3.client('s3')
+                      bucket_name = event['ResourceProperties']['BucketName']
+                      schema_key = event['ResourceProperties']['SchemaKey']
+                      schema_content = event['ResourceProperties']['SchemaContent']
+                      
+                      # Upload to S3
+                      s3.put_object(
+                          Bucket=bucket_name,
+                          Key=schema_key,
+                          Body=schema_content,
+                          ContentType='application/yaml'
+                      )
+                      
+                      response_data['SchemaUrl'] = f"s3://{bucket_name}/{schema_key}"
+                      cfnresponse.send(event, context, cfnresponse.SUCCESS, response_data)
+                  elif event['RequestType'] == 'Delete':
+                      # Nothing to do for delete
+                      cfnresponse.send(event, context, cfnresponse.SUCCESS, response_data)
+              except Exception as e:
+                  print(f"Error: {str(e)}")
+                  cfnresponse.send(event, context, cfnresponse.FAILED, {"Error": str(e)})
+
+  # IAM Role for the Lambda function that uploads schema
+  UploadOpenApiSchemaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: S3Access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource:
+                  - !GetAtt SchemaBucket.Arn
+                  - !Sub 'arn:aws:s3:::${SchemaBucket}/*'
+
+  # Custom resource to upload OpenAPI schema to S3
+  UploadOpenApiSchema:
+    Type: AWS::CloudFormation::CustomResource
+    Properties:
+      ServiceToken: !GetAtt UploadOpenApiSchemaFunction.Arn
+      BucketName: !Ref SchemaBucket
+      SchemaKey: 'openapi_schema.yaml'
+      SchemaContent: |
+        openapi: 3.0.0
+        info:
+          title: Redshift Serverless Knowledge Base Query API
+          description: API for querying Amazon Redshift serverless knowledge base across accounts
+          version: 1.0.0
+        paths:
+          /query:
+            post:
+              summary: Query the Redshift serverless knowledge base
+              description: Sends a natural language query to retrieve information from the Amazon Redshift serverless knowledge base
+              operationId: queryKnowledgeBase
+              requestBody:
+                required: true
+                content:
+                  application/json:
+                    schema:
+                      $ref: '#/components/schemas/QueryRequest'
+                    examples:
+                      basic:
+                        value:
+                          query: How do I set up Amazon Redshift serverless?
+                      specific:
+                        value:
+                          query: What are the pricing options for Redshift serverless?
+              responses:
+                '200':
+                  description: Successful response with query results
+                  content:
+                    application/json:
+                      schema:
+                        $ref: '#/components/schemas/QueryResponse'
+                '400':
+                  description: Bad request - missing or invalid parameters
+                  content:
+                    application/json:
+                      schema:
+                        $ref: '#/components/schemas/ErrorResponse'
+                '500':
+                  description: Internal server error
+                  content:
+                    application/json:
+                      schema:
+                        $ref: '#/components/schemas/ErrorResponse'
+        components:
+          schemas:
+            QueryRequest:
+              type: object
+              required:
+                - query
+              properties:
+                query:
+                  type: string
+                  description: The natural language query about Amazon Redshift serverless
+                  example: How do I set up Amazon Redshift serverless?
+            QueryResponse:
+              type: object
+              properties:
+                messageVersion:
+                  type: string
+                  description: Version of the message format
+                  example: '1.0'
+                response:
+                  type: object
+                  properties:
+                    answer:
+                      type: string
+                      description: Generated answer to the query
+                      example: To set up Amazon Redshift serverless, you need to follow these steps...
+                    citations:
+                      type: array
+                      description: Citations and sources for the generated answer
+                      items:
+                        type: object
+                        properties:
+                          retrievedReferences:
+                            type: array
+                            items:
+                              type: object
+                          generatedResponsePart:
+                            type: string
+                    query:
+                      type: string
+                      description: The original query that was processed
+                      example: How do I set up Amazon Redshift serverless?
+                    source:
+                      type: string
+                      description: Source of the information
+                      example: Amazon Redshift serverless knowledge base
+            ErrorResponse:
+              type: object
+              properties:
+                messageVersion:
+                  type: string
+                  example: '1.0'
+                response:
+                  type: object
+                  properties:
+                    error:
+                      type: string
+                      description: Error message describing what went wrong
+                      example: No query provided in the event
+                    errorType:
+                      type: string
+                      description: Type of error that occurred
+                      example: ValueError
+
+  # Lambda function for cross-account knowledge base queries
+  RedshiftServerlessKbQueryFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: redshift_serverless_kb_query
+      Handler: index.lambda_handler
+      Role: !Ref AgentLambdaExecutionRoleArn
+      Runtime: python3.10
+      Timeout: 300  # 5 minute timeout
+      MemorySize: 256  # 256 MB memory
+      Environment:
+        Variables:
+          KNOWLEDGE_BASE_ID: !Ref KnowledgeBaseId
+          TARGET_ROLE_ARN: !Ref TargetRoleArn
+          FOUNDATION_MODEL: !Ref KBFoundationModelId
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+          import logging
+          from botocore.exceptions import ClientError
+
+          # Configure logging
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          def assume_role(role_arn, session_name):
+              """
+              Assume a role in another AWS account
+              
+              Args:
+                  role_arn (str): ARN of the role to assume
+                  session_name (str): Name for the session
+                  
+              Returns:
+                  dict: Credentials for the assumed role
+              """
+              sts_client = boto3.client('sts')
+              try:
+                  response = sts_client.assume_role(
+                      RoleArn=role_arn,
+                      RoleSessionName=session_name
+                  )
+                  return response['Credentials']
+              except ClientError as e:
+                  logger.error(f"Error assuming role: {e}")
+                  raise
+
+          def lambda_handler(event, context):
+              """
+              Lambda function to query the Amazon Redshift serverless knowledge base
+              across accounts (from agent account to agent-kb account).
+              
+              This function is designed to be used in a Bedrock agent action group.
+              
+              Args:
+                  event (dict): Lambda event data containing the query
+                  context (object): Lambda context
+                  
+              Returns:
+                  dict: Response formatted for Bedrock agent consumption
+              """
+              try:
+                  # Log the incoming event
+                  logger.info(f"Received event: {json.dumps(event)}")
+                  
+                  # Extract query from the event based on API schema format
+                  query = None
+                  
+                  # Check if this is an API schema action group
+                  if 'requestBody' in event and 'content' in event['requestBody']:
+                      content_type = next(iter(event['requestBody']['content']), None)
+                      if content_type and 'properties' in event['requestBody']['content'][content_type]:
+                          properties = event['requestBody']['content'][content_type]['properties']
+                          for prop in properties:
+                              if prop['name'] == 'query':
+                                  query = prop['value']
+                                  break
+                  
+                  # If query not found in requestBody, check parameters
+                  if not query and 'parameters' in event:
+                      for param in event['parameters']:
+                          if param['name'] == 'query':
+                              query = param['value']
+                              break
+                  
+                  # If still no query, try direct access (for testing)
+                  if not query and 'query' in event:
+                      query = event['query']
+                  
+                  if not query:
+                      # Return error response in the format expected by Bedrock agent
+                      error_response = {
+                          'messageVersion': '1.0',
+                          'response': {
+                              'actionGroup': event.get('actionGroup', 'RedshiftKnowledgeBase'),
+                              'apiPath': event.get('apiPath', '/query'),
+                              'httpMethod': event.get('httpMethod', 'POST'),
+                              'httpStatusCode': 400,
+                              'responseBody': {
+                                  'application/json': {
+                                      'body': json.dumps({
+                                          'error': 'No query provided in the request'
+                                      })
+                                  }
+                              }
+                          },
+                          'sessionAttributes': event.get('sessionAttributes', {}),
+                          'promptSessionAttributes': event.get('promptSessionAttributes', {})
+                      }
+                      return error_response
+                  
+                  # Get configuration from environment variables with defaults
+                  knowledge_base_id = os.environ.get('KNOWLEDGE_BASE_ID')
+                  target_role_arn = os.environ.get('TARGET_ROLE_ARN')
+                  foundation_model = os.environ.get('FOUNDATION_MODEL', 'meta.llama3-1-70b-instruct-v1:0')
+                  region = os.environ.get('AWS_REGION', 'us-west-2')
+                  
+                  # Create a Bedrock Agent Runtime client
+                  if target_role_arn:
+                      # Cross-account scenario: assume role in agent-kb account
+                      logger.info(f"Assuming role: {target_role_arn}")
+                      credentials = assume_role(target_role_arn, 'LambdaBedrockQuery')
+                      
+                      bedrock_agent = boto3.client(
+                          'bedrock-agent-runtime',
+                          region_name=region,
+                          aws_access_key_id=credentials['AccessKeyId'],
+                          aws_secret_access_key=credentials['SecretAccessKey'],
+                          aws_session_token=credentials['SessionToken']
+                      )
+                      logger.info("Successfully created cross-account Bedrock client")
+                  else:
+                      # Same account scenario
+                      bedrock_agent = boto3.client('bedrock-agent-runtime', region_name=region)
+                      logger.info("Using default Bedrock client")
+                  
+                  # Query the Amazon Redshift serverless knowledge base
+                  logger.info(f"Querying knowledge base: {knowledge_base_id}")
+                  response = bedrock_agent.retrieve_and_generate(
+                      input={
+                          'text': query
+                      },
+                      retrieveAndGenerateConfiguration={
+                          'type': 'KNOWLEDGE_BASE',
+                          'knowledgeBaseConfiguration': {
+                              'knowledgeBaseId': knowledge_base_id,
+                              "modelArn": f"arn:aws:bedrock:{region}::foundation-model/{foundation_model}",
+                              "retrievalConfiguration": {
+                                  "vectorSearchConfiguration": {
+                                      "numberOfResults": 5
+                                  }
+                              }
+                          }
+                      }
+                  )
+                  
+                  # Extract the generated text
+                  generated_text = response.get('output', {}).get('text', '')
+                  logger.info(f"Generated text: {generated_text}")
+                  logger.info(f"Generated response: {response}")
+                  
+                  # Extract citations and sources for better context
+                  citations = []
+                  if 'citations' in response.get('output', {}):
+                      for citation in response['output']['citations']:
+                          citation_data = {
+                              'retrievedReferences': citation.get('retrievedReferences', []),
+                              'generatedResponsePart': citation.get('generatedResponsePart', '')
+                          }
+                          citations.append(citation_data)
+                  
+                  # Format response for agent action group consumption according to AWS docs
+                  result = {
+                      'answer': generated_text,
+                      'citations': citations,
+                      'query': query,
+                      'source': 'Amazon Redshift serverless knowledge base id: ' + knowledge_base_id
+                  }
+                  
+                  # Create the response in the format expected by Bedrock agent
+                  agent_response = {
+                      'messageVersion': '1.0',
+                      'response': {
+                          'actionGroup': event.get('actionGroup', 'RedshiftKnowledgeBase'),
+                          'apiPath': event.get('apiPath', '/query'),
+                          'httpMethod': event.get('httpMethod', 'POST'),
+                          'httpStatusCode': 200,
+                          'responseBody': {
+                              'application/json': {
+                                  'body': json.dumps(result)
+                              }
+                          }
+                      },
+                      'sessionAttributes': event.get('sessionAttributes', {}),
+                      'promptSessionAttributes': event.get('promptSessionAttributes', {})
+                  }
+                  
+                  return agent_response
+                  
+              except Exception as e:
+                  logger.error(f"Error: {str(e)}")
+                  # Format error response for agent action group
+                  error_response = {
+                      'messageVersion': '1.0',
+                      'response': {
+                          'actionGroup': event.get('actionGroup', 'RedshiftKnowledgeBase'),
+                          'apiPath': event.get('apiPath', '/query'),
+                          'httpMethod': event.get('httpMethod', 'POST'),
+                          'httpStatusCode': 500,
+                          'responseBody': {
+                          'application/json': {
+                              'body': json.dumps({
+                                  'error': str(e),
+                                  'errorType': type(e).__name__
+                              })
+                          }
+                          }
+                      },
+                      'sessionAttributes': event.get('sessionAttributes', {}),
+                      'promptSessionAttributes': event.get('promptSessionAttributes', {})
+                  }
+                  return error_response
+
+  # IAM Role for Bedrock Agent
+  BedrockAgentRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AmazonBedrockAgentInferenceProfilesCrossRegionPolicyProd
+            Effect: Allow
+            Principal:
+              Service: bedrock.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+              ArnLike:
+                aws:SourceArn: !Sub 'arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:agent/*'
+      ManagedPolicyArns:
+        - !Ref BedrockAgentPolicy
+      Path: /service-role/
+      RoleName: AmazonBedrockExecutionRoleFor_bedrock_kb_query_cross_account
+
+  # IAM Policy for Bedrock Agent
+  BedrockAgentPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      Description: Policy for Amazon Bedrock Agent to invoke Lambda and access cross-region resources
+      ManagedPolicyName: AmazonBedrockAgentInferenceProfilesCrossRegionPolicy_NovaPro
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AmazonBedrockAgentInferenceProfilesCrossRegionPolicyProd
+            Effect: Allow
+            Action:
+              - bedrock:InvokeModel
+              - bedrock:InvokeModelWithResponseStream
+              - bedrock:GetInferenceProfile
+              - bedrock:GetFoundationModel
+            Resource:
+              - !Sub 'arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/us.amazon.nova-pro-v1:0'
+              - !Sub 'arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/amazon.nova-pro-v1:0'
+              - 'arn:aws:bedrock:*::foundation-model/amazon.nova-pro-v1:0'
+          # Additional permission for Lambda invocation
+          - Effect: Allow
+            Action:
+              - lambda:InvokeFunction
+            Resource: !GetAtt RedshiftServerlessKbQueryFunction.Arn
+          # Permission to read from S3 bucket
+          - Effect: Allow
+            Action:
+              - s3:GetObject
+            Resource: !Sub 'arn:aws:s3:::${SchemaBucket}/*'
+
+  # Bedrock Agent
+  BedrockAgent:
+    Type: AWS::Bedrock::Agent
+    DependsOn:
+      - UploadOpenApiSchema
+      - RedshiftServerlessKbQueryFunction
+    Properties:
+      AgentName: !Ref BedrockAgentName
+      AgentResourceRoleArn: !GetAtt BedrockAgentRole.Arn
+      Description: !Ref BedrockAgentDescription
+      Instruction: !Ref BedrockAgentInstructions
+      FoundationModel: !Ref AgentFoundationModelId
+      IdleSessionTTLInSeconds: 1800
+      AutoPrepare: true
+      ActionGroups:
+        - ActionGroupName: bedrock_kb_query_cross_account_ag
+          Description: Action group for querying Redshift Serverless knowledge base across accounts
+          ActionGroupExecutor:
+            Lambda: !GetAtt RedshiftServerlessKbQueryFunction.Arn
+          ApiSchema:
+            S3:
+              S3BucketName: !Ref SchemaBucket
+              S3ObjectKey: 'openapi_schema.yaml'
+
+  # Lambda resource policy to allow Bedrock agent to invoke the function
+  LambdaResourcePolicy:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref RedshiftServerlessKbQueryFunction
+      Principal: bedrock.amazonaws.com
+      SourceArn: !Sub 'arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:agent/${BedrockAgent}'
+
+Outputs:
+  BedrockAgentId:
+    Description: ID of the created Bedrock Agent
+    Value: !Ref BedrockAgent
+    
+  BedrockAgentArn:
+    Description: ARN of the created Bedrock Agent
+    Value: !Sub 'arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:agent/${BedrockAgent}'
+  
+  BedrockAgentRoleArn:
+    Description: ARN of the IAM role for the Bedrock Agent
+    Value: !GetAtt BedrockAgentRole.Arn
+    
+  LambdaFunctionArn:
+    Description: ARN of the Lambda function
+    Value: !GetAtt RedshiftServerlessKbQueryFunction.Arn
+  
+  LambdaFunctionName:
+    Description: Name of the Lambda function
+    Value: !Ref RedshiftServerlessKbQueryFunction
+    
+  SchemaBucketName:
+    Description: Name of the S3 bucket containing the OpenAPI schema
+    Value: !Ref SchemaBucket
+    
+  SchemaUrl:
+    Description: URL of the OpenAPI schema in S3
+    Value: !Sub 's3://${SchemaBucket}/openapi_schema.yaml'
