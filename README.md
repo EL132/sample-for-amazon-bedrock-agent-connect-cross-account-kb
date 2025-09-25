@@ -17,34 +17,41 @@ This solution enables cross-account knowledge base integration through a secure,
 
 ## Architecture Overview
 
+![Cross-Account Bedrock Architecture](images/cross-account-bedrock-kb-architecture-fixed.drawio.png)
+
 The solution consists of two AWS accounts:
 
 - ***agent* Account**: Contains the Bedrock Agent and Lambda function
 - ***agent-kb* Account**: Contains the Bedrock Knowledge Base with data
 
-![Cross-Account Bedrock Architecture](images/cross-account-bedrock-kb-architecture-fixed.drawio.png)
+The action flow as shown above: 
+1. Users enter their natural language question in **Amazon Bedrock Agent** which is configured in **agent account** above. 
+2. **Amazon Bedrock Agent** invokes **AWS Lambda function** through action groups which provides access to the **Amazon Bedrock Knowledge base** configured in **agent-kb account** above. 
+3. Action group **AWS Lambda function** running in **agent account** assumes an IAM role created in **agent-kb account** above to connect to **Amazon Bedrock Knowledge base** in **agent-kb account**. 
+4. **Amazon Bedrock Knowledge base** in **agent-kb account** uses an **IAM role** created in the same account to access **Amazon Redshift** data warehouse and query data in the data warehouse.
 
 The solution follows these key aspects:-
 
-1. Amazon Bedrock agent in the *agent* account that handles user interactions.
-2. Amazon Redshift serverless workgroup in VPC and private subnet in the *agent-kb* account containing structured data.
-3. Amazon Bedrock Knowledgebase which is using the Amazon Redshift serverless workgroup as structured data source.
-4. AWS Lambda function in *agent* account.
-5. Action group configuration that connects the agent in the *agent* account to the Lambda function.
-6. IAM roles and policies that enable secure cross-account access.
+1. **Amazon Bedrock agent** in the **agent** account that handles user interactions.
+2. **Amazon Redshift serverless workgroup** in VPC and private subnet in the **agent-kb** account containing structured data.
+3. **Amazon Bedrock Knowledgebase** which is using the Amazon Redshift serverless workgroup as structured data source.
+4. **AWS Lambda function** in **agent** account.
+5. **Action group configuration** that connects the agent in the **agent** account to the Lambda function.
+6. **IAM roles and policies** that enable secure cross-account access.
+
 
 ## Prerequisites
 This solution requires you to have the following.
 1.	Two AWS accounts. Follow this [link](https://aws.amazon.com/resources/create-account/) to create an AWS account if you do not have one. Specific permissions required for both account which will be set up in subsequent steps.
 2.	[Install the AWS CLI](https://docs.aws.amazon.com/cli/v1/userguide/cli-chap-install.html) (2.24.22 - current version)
 3.	[Set up authentication using IAM user credentials for the AWS CLI](https://docs.aws.amazon.com/cli/latest/userguide/cli-authentication-user.html) for each account.
-4.	Make sure you have [jq](https://jqlang.org/) installed, jq is lightweight command-line JSON processor. For example, in Mac you can use the command brew install jq (jq-1.7.1-apple – current version) to install it.
+4.	Make sure you have [jq](https://jqlang.org/) installed, jq is lightweight command-line JSON processor. For example, in Mac you can use the command `brew install jq` (jq-1.7.1-apple – current version) to install it.
 
 ## Assumption
 Let’s call the AWS account *agent* profile that has the Amazon Bedrock agent. Similarly, the AWS account profile be called *agent-kb* that has the Amazon Bedrock knowledge base with Amazon Redshift Serverless and the structured data source. We will use *us-west-2 (Oregon)* region but feel free to choose a region as necessary. We will use the *meta.llama3-1-70b-instruct-v1:0* model for the *agent-kb*. This is an available on-demand model in *us-west-2 (Oregon)*. You are free to choose other models with cross-region inference but that would mean changing the roles and polices accordingly and enable model access in all US regions they are available in. For the *agent* we will be using Amazon Bedrock agent optimized model like *us.amazon.nova-pro-v1:0*. 
 
 ## Implementation walkthrough
-Following are the step by implementation guide. Make sure that all set ups are in the same region in both accounts.
+Following are the step by step implementation guide. Make sure that all set ups are in the same region in both accounts.
 
 ### Step 1: Make a note of AWS account numbers in agent and agent-kb account.
 In the implementation steps we will refer them as follows. 
