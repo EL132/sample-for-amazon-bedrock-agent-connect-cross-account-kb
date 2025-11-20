@@ -144,7 +144,7 @@ scripts/create_bedrock_agent_kb_roles_policies.sh \
 
 ![Agent CF2](images/agent_CF2.png)
 
-  3. Enter the following stacj details and click *Next*.
+  3. Enter the following stack details and click *Next*.
 
 | Parameter | Value | Description |
 |---|---|---|
